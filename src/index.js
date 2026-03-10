@@ -16,7 +16,15 @@ const PORT = process.env.PORT || 5000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
 // Middlewares
-app.use(cors({ origin: CORS_ORIGIN }));
+app.use(cors({ 
+  origin: [
+    process.env.CORS_ORIGIN,
+    'https://front-end-computek.vercel.app',
+    'https://front-end-computek-y3gx.vercel.app',
+    /^https:\/\/.*\.vercel\.app$/
+  ],
+  credentials: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
