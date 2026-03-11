@@ -21,6 +21,7 @@ app.use(cors({
     process.env.CORS_ORIGIN,
     'https://front-end-computek.vercel.app',
     'https://front-end-computek-y3gx.vercel.app',
+    'http://localhost:5173',
     /^https:\/\/.*\.vercel\.app$/
   ],
   credentials: true
