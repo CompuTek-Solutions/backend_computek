@@ -54,10 +54,17 @@ export const initializeDatabase = async () => {
         email VARCHAR(255),
         phone VARCHAR(50),
         address TEXT,
+        rccm VARCHAR(120),
+        postal_box VARCHAR(120),
+        nc VARCHAR(120),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    await query('ALTER TABLE clients ADD COLUMN IF NOT EXISTS rccm VARCHAR(120)').catch(() => {});
+    await query('ALTER TABLE clients ADD COLUMN IF NOT EXISTS postal_box VARCHAR(120)').catch(() => {});
+    await query('ALTER TABLE clients ADD COLUMN IF NOT EXISTS nc VARCHAR(120)').catch(() => {});
 
     // Table Sales
     await query(`

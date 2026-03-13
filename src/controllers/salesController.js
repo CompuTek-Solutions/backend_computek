@@ -158,7 +158,15 @@ export const getSaleDetails = async (req, res) => {
     const { id } = req.params;
 
     const saleResult = await query(
-      `SELECT s.*, u.name as seller_name, c.name as client_name
+      `SELECT s.*,
+              u.name AS seller_name,
+              c.name AS client_name,
+              c.email AS client_email,
+              c.phone AS client_phone,
+              c.address AS client_address,
+              c.rccm AS client_rccm,
+              c.postal_box AS client_postal_box,
+              c.nc AS client_nc
        FROM sales s
        JOIN users u ON s.seller_id = u.id
        LEFT JOIN clients c ON s.client_id = c.id

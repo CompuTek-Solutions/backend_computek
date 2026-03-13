@@ -34,15 +34,23 @@ export const getClientById = async (req, res) => {
 
 export const createClient = async (req, res) => {
   try {
-    const { name, email, phone, address } = req.body;
+    const { name, email, phone, address, rccm, postal_box, nc } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: 'Le nom du client est requis' });
     }
     const result = await query(
-      `INSERT INTO clients (name, email, phone, address)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO clients (name, email, phone, address, rccm, postal_box, nc)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [name.trim(), email?.trim() || null, phone?.trim() || null, address?.trim() || null]
+      [
+        name.trim(),
+        email?.trim() || null,
+        phone?.trim() || null,
+        address?.trim() || null,
+        rccm?.trim() || null,
+        postal_box?.trim() || null,
+        nc?.trim() || null,
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -54,17 +62,29 @@ export const createClient = async (req, res) => {
 export const updateClient = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, email, phone, address } = req.body;
+    const { name, email, phone, address, rccm, postal_box, nc } = req.body;
     const result = await query(
       `UPDATE clients
        SET name = COALESCE($1, name),
            email = COALESCE($2, email),
            phone = COALESCE($3, phone),
            address = COALESCE($4, address),
+           rccm = COALESCE($5, rccm),
+           postal_box = COALESCE($6, postal_box),
+           nc = COALESCE($7, nc),
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $5
+       WHERE id = $8
        RETURNING *`,
-      [name?.trim(), email?.trim(), phone?.trim(), address?.trim(), id]
+      [
+        name?.trim(),
+        email?.trim(),
+        phone?.trim(),
+        address?.trim(),
+        rccm?.trim(),
+        postal_box?.trim(),
+        nc?.trim(),
+        id,
+      ]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Client non trouvé' });
