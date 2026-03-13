@@ -3,15 +3,77 @@ import { query } from '../db.js';
 export const getClients = async (req, res) => {
   try {
     const { search } = req.query;
-    let sql = 'SELECT * FROM clients WHERE 1=1';
+    const hasPagination =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'pageSize');
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 10, 1), 100);
+    const offset = (page - 1) * pageSize;
+
+    const whereClauses = [];
     const params = [];
+
     if (search) {
       params.push(`%${search}%`);
-      sql += ` AND (name ILIKE $${params.length} OR email ILIKE $${params.length} OR phone ILIKE $${params.length})`;
+      const searchIndex = params.length;
+      whereClauses.push(`(
+        COALESCE(name, '') ILIKE $${searchIndex}
+        OR COALESCE(email, '') ILIKE $${searchIndex}
+        OR COALESCE(phone, '') ILIKE $${searchIndex}
+        OR COALESCE(address, '') ILIKE $${searchIndex}
+      )`);
     }
-    sql += ' ORDER BY name ASC';
-    const result = await query(sql, params);
-    res.json(result.rows);
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    let dataQuery = `
+      SELECT 
+        id,
+        name,
+        email,
+        phone,
+        address,
+        rccm,
+        postal_box,
+        nc,
+        created_at,
+        updated_at
+      FROM clients
+      ${whereSql}
+      ORDER BY name ASC
+    `;
+
+    const dataParams = [...params];
+
+    if (hasPagination) {
+      const limitIndex = dataParams.length + 1;
+      const offsetIndex = dataParams.length + 2;
+      dataQuery += `
+        LIMIT $${limitIndex}
+        OFFSET $${offsetIndex}
+      `;
+      dataParams.push(pageSize, offset);
+    }
+
+    const result = await query(dataQuery, dataParams);
+
+    if (!hasPagination) {
+      return res.json(result.rows);
+    }
+
+    const countResult = await query(`SELECT COUNT(*) AS total FROM clients ${whereSql}`, params);
+    const total = parseInt(countResult.rows[0]?.total ?? 0, 10);
+
+    res.json({
+      data: result.rows,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize) || 1,
+      },
+    });
   } catch (error) {
     console.error('Get clients error:', error);
     res.status(500).json({ error: 'Erreur serveur' });

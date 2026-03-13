@@ -104,8 +104,66 @@ export const createSale = async (req, res) => {
 // Get sales
 export const getSales = async (req, res) => {
   try {
-    const { seller_id, search } = req.query;
-    let sql = `
+    const { seller_id, search, payment_method, date_from, date_to } = req.query;
+    const hasPagination =
+      Object.prototype.hasOwnProperty.call(req.query, 'page') ||
+      Object.prototype.hasOwnProperty.call(req.query, 'pageSize');
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 10, 1), 100);
+    const offset = (page - 1) * pageSize;
+
+    const whereClauses = [];
+    const params = [];
+
+    const addClause = (clause) => {
+      whereClauses.push(clause);
+    };
+
+    // Si c'est un vendeur, ne voir que ses ventes
+    if (req.user.role === 'seller') {
+      params.push(req.user.id);
+      addClause(`s.seller_id = $${params.length}`);
+    } else if (seller_id) {
+      // Admin filtre par vendeur
+      params.push(seller_id);
+      addClause(`s.seller_id = $${params.length}`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      addClause(`(
+        s.id::text ILIKE $${params.length}
+        OR COALESCE(s.invoice_number, '') ILIKE $${params.length}
+        OR COALESCE(c.name, '') ILIKE $${params.length}
+        OR COALESCE(u.name, '') ILIKE $${params.length}
+      )`);
+    }
+
+    if (payment_method && payment_method !== 'all') {
+      params.push(payment_method);
+      addClause(`s.payment_method = $${params.length}`);
+    }
+
+    if (date_from) {
+      params.push(date_from);
+      addClause(`s.created_at >= $${params.length}`);
+    }
+
+    if (date_to) {
+      params.push(`${date_to} 23:59:59`);
+      addClause(`s.created_at <= $${params.length}`);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    const baseFrom = `
+      FROM sales s
+      JOIN users u ON s.seller_id = u.id
+      LEFT JOIN clients c ON s.client_id = c.id
+    `;
+
+    let dataQuery = `
       SELECT 
         s.id,
         s.seller_id,
@@ -119,33 +177,52 @@ export const getSales = async (req, res) => {
         s.status,
         s.created_at,
         COUNT(si.id) as items_count
-      FROM sales s
-      JOIN users u ON s.seller_id = u.id
-      LEFT JOIN clients c ON s.client_id = c.id
+      ${baseFrom}
       LEFT JOIN sale_items si ON s.id = si.sale_id
-      WHERE 1=1
+      ${whereSql}
+      GROUP BY s.id, u.name, c.name
+      ORDER BY s.created_at DESC
     `;
-    const params = [];
 
-    // Si c'est un vendeur, ne voir que ses ventes
-    if (req.user.role === 'seller') {
-      sql += ' AND s.seller_id = $' + (params.length + 1);
-      params.push(req.user.id);
-    } else if (seller_id) {
-      // Admin filtre par vendeur
-      sql += ' AND s.seller_id = $' + (params.length + 1);
-      params.push(seller_id);
+    const dataParams = [...params];
+
+    if (hasPagination) {
+      const limitIndex = dataParams.length + 1;
+      const offsetIndex = dataParams.length + 2;
+      dataQuery += `
+        LIMIT $${limitIndex}
+        OFFSET $${offsetIndex}
+      `;
+      dataParams.push(pageSize, offset);
     }
 
-    if (search) {
-      sql += ' AND s.id::text ILIKE $' + (params.length + 1);
-      params.push(`%${search}%`);
+    const result = await query(dataQuery, dataParams);
+
+    if (!hasPagination) {
+      return res.json(result.rows);
     }
 
-    sql += ' GROUP BY s.id, u.name, c.name ORDER BY s.created_at DESC';
+    const statsQuery = `
+      SELECT 
+        COUNT(*) AS total,
+        COALESCE(SUM(s.total_amount), 0) AS total_amount_sum
+      ${baseFrom}
+      ${whereSql}
+    `;
+    const statsResult = await query(statsQuery, params);
+    const total = parseInt(statsResult.rows[0]?.total ?? 0, 10);
+    const totalAmount = parseFloat(statsResult.rows[0]?.total_amount_sum ?? 0);
 
-    const result = await query(sql, params);
-    res.json(result.rows);
+    res.json({
+      data: result.rows,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize) || 1,
+        totalAmount,
+      },
+    });
   } catch (error) {
     console.error('Get sales error:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -302,17 +379,67 @@ export const getSellerStatistics = async (req, res) => {
       [sellerId]
     );
 
+    const topProductsResult = await query(
+      `SELECT 
+        p.id,
+        p.name,
+        SUM(si.quantity) as quantity_sold,
+        SUM(si.subtotal) as total_revenue
+       FROM sale_items si
+       JOIN sales s ON si.sale_id = s.id
+       JOIN products p ON si.product_id = p.id
+       WHERE s.seller_id = $1
+       GROUP BY p.id, p.name
+       ORDER BY quantity_sold DESC
+       LIMIT 10`,
+      [sellerId]
+    );
+
+    const categoryResult = await query(
+      `SELECT 
+        p.category,
+        COUNT(DISTINCT si.sale_id) as sales_count,
+        SUM(si.subtotal) as total_revenue
+       FROM sale_items si
+       JOIN sales s ON si.sale_id = s.id
+       JOIN products p ON si.product_id = p.id
+       WHERE s.seller_id = $1 AND p.category IS NOT NULL
+       GROUP BY p.category
+       ORDER BY total_revenue DESC`,
+      [sellerId]
+    );
+
+    const monthlyResult = await query(
+      `SELECT 
+        DATE_TRUNC('month', s.created_at)::date as month,
+        COALESCE(SUM(s.total_amount), 0) as total_revenue,
+        COUNT(*) as sales_count
+       FROM sales s
+       WHERE s.seller_id = $1
+       GROUP BY DATE_TRUNC('month', s.created_at)
+       ORDER BY month DESC
+       LIMIT 12`,
+      [sellerId]
+    );
+
     const totalRevenue = parseFloat(revenueResult.rows[0].total_revenue);
+    const totalOrders = parseInt(ordersResult.rows[0].count);
+    const totalItems = parseInt(itemsResult.rows[0].total_items);
     const commissionRate = 0; // Commission removed
     const commission = 0;
 
     res.json({
-      total_revenue: totalRevenue,
-      total_orders: parseInt(ordersResult.rows[0].count),
-      total_items: parseInt(itemsResult.rows[0].total_items),
+      summary: {
+        total_revenue: totalRevenue,
+        total_orders: totalOrders,
+        total_items: totalItems,
+        avg_order: totalRevenue / totalOrders || 0,
+      },
       commission_rate: commissionRate,
-      commission: commission,
-      avg_order: totalRevenue / parseInt(ordersResult.rows[0].count) || 0,
+      commission,
+      top_products: topProductsResult.rows,
+      categories: categoryResult.rows,
+      monthly_sales: monthlyResult.rows,
     });
   } catch (error) {
     console.error('Get seller statistics error:', error);
