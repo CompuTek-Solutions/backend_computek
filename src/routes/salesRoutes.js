@@ -5,6 +5,7 @@ import {
   getSaleDetails,
   getStatistics,
   getSellerStatistics,
+  deleteSale,
 } from '../controllers/salesController.js';
 import { authenticate } from '../middlewares/auth.js';
 
@@ -16,5 +17,6 @@ router.get('/', authenticate, getSales);
 router.get('/stats/overview', authenticate, getStatistics);
 router.get('/stats/seller', authenticate, getSellerStatistics);
 router.get('/:id', authenticate, getSaleDetails);
+router.delete('/:id', authenticate, deleteSale);
 
 export default router;

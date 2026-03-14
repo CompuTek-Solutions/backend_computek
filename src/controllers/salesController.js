@@ -446,3 +446,58 @@ export const getSellerStatistics = async (req, res) => {
     res.status(500).json({ error: 'Erreur serveur' });
   }
 };
+
+// Delete sale / invoice
+export const deleteSale = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    await query('BEGIN');
+
+    const saleResult = await query(
+      `SELECT id, seller_id FROM sales WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+
+    if (saleResult.rows.length === 0) {
+      await query('ROLLBACK');
+      return res.status(404).json({ error: 'Facture introuvable' });
+    }
+
+    const sale = saleResult.rows[0];
+
+    if (req.user.role === 'seller' && sale.seller_id !== req.user.id) {
+      await query('ROLLBACK');
+      return res.status(403).json({ error: 'Action non autorisée' });
+    }
+
+    const itemsResult = await query(
+      `SELECT product_id, quantity FROM sale_items WHERE sale_id = $1`,
+      [id]
+    );
+
+    if (itemsResult.rows.length > 0) {
+      const productIds = itemsResult.rows.map((item) => item.product_id);
+      const quantities = itemsResult.rows.map((item) => item.quantity);
+
+      await query(
+        `UPDATE inventory
+         SET quantity_on_hand = inventory.quantity_on_hand + data.qty,
+             updated_at = NOW()
+         FROM (SELECT unnest($1::uuid[]) AS pid, unnest($2::int[]) AS qty) AS data
+         WHERE inventory.product_id = data.pid`,
+        [productIds, quantities]
+      );
+    }
+
+    await query(`DELETE FROM sales WHERE id = $1`, [id]);
+
+    await query('COMMIT');
+
+    res.json({ message: 'Facture supprimée avec succès' });
+  } catch (error) {
+    await query('ROLLBACK');
+    console.error('Delete sale error:', error);
+    res.status(500).json({ error: 'Erreur serveur lors de la suppression' });
+  }
+};
