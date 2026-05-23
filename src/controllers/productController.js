@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { normalizeSearchTerm } from '../utils/normalize.js';
 
 // Get all products
 export const getProducts = async (req, res) => {
@@ -14,7 +15,7 @@ export const getProducts = async (req, res) => {
     const params = [];
 
     if (search) {
-      sql += ' AND (p.name ILIKE $' + (params.length + 1) + ' OR p.barcode ILIKE $' + (params.length + 1) + ')';
+      sql += ' AND (unaccent(p.name) ILIKE unaccent($' + (params.length + 1) + ') OR unaccent(p.barcode) ILIKE unaccent($' + (params.length + 1) + '))';
       params.push(`%${search}%`);
     }
 

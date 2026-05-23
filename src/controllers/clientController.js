@@ -18,10 +18,10 @@ export const getClients = async (req, res) => {
       params.push(`%${search}%`);
       const searchIndex = params.length;
       whereClauses.push(`(
-        COALESCE(name, '') ILIKE $${searchIndex}
-        OR COALESCE(email, '') ILIKE $${searchIndex}
-        OR COALESCE(phone, '') ILIKE $${searchIndex}
-        OR COALESCE(address, '') ILIKE $${searchIndex}
+        unaccent(COALESCE(name, '')) ILIKE unaccent($${searchIndex})
+        OR unaccent(COALESCE(email, '')) ILIKE unaccent($${searchIndex})
+        OR unaccent(COALESCE(phone, '')) ILIKE unaccent($${searchIndex})
+        OR unaccent(COALESCE(address, '')) ILIKE unaccent($${searchIndex})
       )`);
     }
 

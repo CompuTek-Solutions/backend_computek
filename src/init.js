@@ -4,6 +4,9 @@ import bcrypt from 'bcryptjs';
 // Fonction pour initialiser la base de données
 export const initializeDatabase = async () => {
   try {
+    // Create unaccent extension for accent-insensitive search
+    await query(`CREATE EXTENSION IF NOT EXISTS unaccent`).catch(() => {});
+
     // Table Users
     await query(`
       CREATE TABLE IF NOT EXISTS users (

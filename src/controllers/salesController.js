@@ -134,9 +134,9 @@ export const getSales = async (req, res) => {
       params.push(`%${search}%`);
       addClause(`(
         s.id::text ILIKE $${params.length}
-        OR COALESCE(s.invoice_number, '') ILIKE $${params.length}
-        OR COALESCE(c.name, '') ILIKE $${params.length}
-        OR COALESCE(u.name, '') ILIKE $${params.length}
+        OR unaccent(COALESCE(s.invoice_number, '')) ILIKE unaccent($${params.length})
+        OR unaccent(COALESCE(c.name, '')) ILIKE unaccent($${params.length})
+        OR unaccent(COALESCE(u.name, '')) ILIKE unaccent($${params.length})
       )`);
     }
 
