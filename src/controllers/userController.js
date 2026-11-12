@@ -1,7 +1,6 @@
 import { query } from '../db.js';
 import bcrypt from 'bcryptjs';
 
-// Get all users (Admin only)
 export const getUsers = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -19,7 +18,6 @@ export const getUsers = async (req, res) => {
   }
 };
 
-// Create user (Admin only)
 export const createUser = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -53,7 +51,6 @@ export const createUser = async (req, res) => {
   }
 };
 
-// Update user (Admin only)
 export const updateUser = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -92,8 +89,6 @@ export const updateUser = async (req, res) => {
       paramCount++;
     }
 
-    // commission_rate removed
-
     if (is_active !== undefined) {
       updateFields.push(`is_active = $${paramCount}`);
       params.push(is_active);
@@ -122,7 +117,6 @@ export const updateUser = async (req, res) => {
   }
 };
 
-// Delete user (Admin only)
 export const deleteUser = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -131,7 +125,6 @@ export const deleteUser = async (req, res) => {
 
     const { id } = req.params;
 
-    // Ne pas permettre de supprimer l'admin
     const userResult = await query('SELECT role FROM users WHERE id = $1', [id]);
     if (userResult.rows.length === 0) {
       return res.status(404).json({ error: 'Utilisateur non trouvé' });
@@ -149,12 +142,16 @@ export const deleteUser = async (req, res) => {
 
     res.json({ message: 'Utilisateur supprimé' });
   } catch (error) {
+    if (error.code === '23503') {
+      return res.status(409).json({
+        error: 'Cet utilisateur a des ventes enregistrées : désactivez-le plutôt que de le supprimer',
+      });
+    }
     console.error('Delete user error:', error);
     res.status(500).json({ error: error.message });
   }
 };
 
-// Assign product to seller (Admin only)
 export const assignProductToSeller = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -182,7 +179,6 @@ export const assignProductToSeller = async (req, res) => {
   }
 };
 
-// Get seller assignments (Admin only)
 export const getSellerAssignments = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -211,7 +207,6 @@ export const getSellerAssignments = async (req, res) => {
   }
 };
 
-// Remove seller assignment (Admin only)
 export const removeSellerAssignment = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {

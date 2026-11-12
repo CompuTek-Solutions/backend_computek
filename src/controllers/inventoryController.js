@@ -1,6 +1,5 @@
 import { query } from '../db.js';
 
-// Get inventory
 export const getInventory = async (req, res) => {
   try {
     const result = await query(`
@@ -24,7 +23,6 @@ export const getInventory = async (req, res) => {
   }
 };
 
-// Update inventory (Admin only)
 export const updateInventory = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -33,22 +31,24 @@ export const updateInventory = async (req, res) => {
 
     const { product_id, quantity_on_hand, quantity_reserved } = req.body;
 
-    if (!product_id || quantity_on_hand === undefined) {
-      return res.status(400).json({ error: 'Champs requis manquants' });
+    const quantity = parseInt(quantity_on_hand, 10);
+    if (!product_id || !Number.isInteger(quantity) || quantity < 0) {
+      return res.status(400).json({ error: 'Produit et quantité positive requis' });
     }
 
     const result = await query(
-      `UPDATE inventory 
-       SET quantity_on_hand = $1, 
-           quantity_reserved = COALESCE($2, quantity_reserved),
+      `INSERT INTO inventory (product_id, quantity_on_hand, quantity_reserved)
+       SELECT id, $1, COALESCE($2, 0) FROM products WHERE id = $3
+       ON CONFLICT (product_id) DO UPDATE
+       SET quantity_on_hand = EXCLUDED.quantity_on_hand,
+           quantity_reserved = COALESCE($2, inventory.quantity_reserved),
            updated_at = CURRENT_TIMESTAMP
-       WHERE product_id = $3
        RETURNING *`,
-      [quantity_on_hand, quantity_reserved || 0, product_id]
+      [quantity, quantity_reserved ?? null, product_id]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Inventaire non trouvé' });
+      return res.status(404).json({ error: 'Produit non trouvé' });
     }
 
     res.json(result.rows[0]);
@@ -58,7 +58,6 @@ export const updateInventory = async (req, res) => {
   }
 };
 
-// Get low stock products (Admin only)
 export const getLowStock = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -84,34 +83,5 @@ export const getLowStock = async (req, res) => {
   } catch (error) {
     console.error('Get low stock error:', error);
     res.status(500).json({ error: 'Erreur serveur' });
-  }
-};
-
-// Adjust inventory for sale
-export const adjustInventoryForSale = async (req, res) => {
-  try {
-    const { product_id, quantity } = req.body;
-
-    if (!product_id || !quantity) {
-      return res.status(400).json({ error: 'Champs requis manquants' });
-    }
-
-    const result = await query(
-      `UPDATE inventory 
-       SET quantity_on_hand = quantity_on_hand - $1,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE product_id = $2
-       RETURNING *`,
-      [quantity, product_id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Inventaire non trouvé' });
-    }
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    console.error('Adjust inventory error:', error);
-    res.status(500).json({ error: error.message });
   }
 };

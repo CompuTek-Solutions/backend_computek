@@ -11,7 +11,6 @@ import { authenticate } from '../middlewares/auth.js';
 
 const router = express.Router();
 
-// Protected routes
 router.post('/', authenticate, createSale);
 router.get('/', authenticate, getSales);
 router.get('/stats/overview', authenticate, getStatistics);

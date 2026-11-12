@@ -13,7 +13,6 @@ export const login = async (req, res) => {
       return res.status(400).json({ error: 'Email/Nom d\'utilisateur et mot de passe sont requis' });
     }
 
-    // Chercher l'utilisateur soit par email soit par name
     const result = await query(
       'SELECT * FROM users WHERE email = $1 OR name = $1',
       [email]
@@ -89,16 +88,24 @@ export const updatePassword = async (req, res) => {
 
     const user = userResult.rows[0];
 
-    if (oldPassword) {
-      const validPassword = await bcrypt.compare(oldPassword, user.password);
-      if (!validPassword) {
-        return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
-      }
+    if (!oldPassword || !(await bcrypt.compare(oldPassword, user.password))) {
+      return res.status(400).json({ error: 'Mot de passe actuel incorrect' });
+    }
 
-      if (!newPassword || newPassword.length < 6) {
+    if (newEmail) {
+      const emailExists = await query('SELECT id FROM users WHERE email = $1 AND id != $2', [
+        newEmail,
+        userId,
+      ]);
+      if (emailExists.rows.length > 0) {
+        return res.status(400).json({ error: 'Cet email est déjà utilisé' });
+      }
+    }
+
+    if (newPassword !== undefined) {
+      if (newPassword.length < 6) {
         return res.status(400).json({ error: 'Nouveau mot de passe requis (min 6 caractères)' });
       }
-
       const hashedPassword = await bcrypt.hash(newPassword, 10);
       await query('UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [
         hashedPassword,
@@ -107,16 +114,6 @@ export const updatePassword = async (req, res) => {
     }
 
     if (newEmail) {
-      // Vérifier que le nouvel email n'existe pas
-      const emailExists = await query('SELECT id FROM users WHERE email = $1 AND id != $2', [
-        newEmail,
-        userId,
-      ]);
-
-      if (emailExists.rows.length > 0) {
-        return res.status(400).json({ error: 'Cet email est déjà utilisé' });
-      }
-
       await query('UPDATE users SET email = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [
         newEmail,
         userId,

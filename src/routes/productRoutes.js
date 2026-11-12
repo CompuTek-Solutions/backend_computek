@@ -1,6 +1,7 @@
 import express from 'express';
 import {
   getProducts,
+  getProductById,
   getProductByBarcode,
   createProduct,
   updateProduct,
@@ -11,12 +12,10 @@ import { authenticate } from '../middlewares/auth.js';
 
 const router = express.Router();
 
-// Public routes
-router.get('/', getProducts);
-router.get('/barcode/:barcode', getProductByBarcode);
-router.get('/categories', getCategories);
-
-// Protected routes
+router.get('/', authenticate, getProducts);
+router.get('/categories', authenticate, getCategories);
+router.get('/barcode/:barcode', authenticate, getProductByBarcode);
+router.get('/:id', authenticate, getProductById);
 router.post('/', authenticate, createProduct);
 router.put('/:id', authenticate, updateProduct);
 router.delete('/:id', authenticate, deleteProduct);

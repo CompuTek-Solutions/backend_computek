@@ -13,9 +13,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:5173';
 
-// Middlewares
 app.use(cors({ 
   origin: [
     process.env.CORS_ORIGIN,
@@ -29,13 +27,11 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Logs
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.path}`);
   next();
 });
 
-// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/inventory', inventoryRoutes);
@@ -43,12 +39,10 @@ app.use('/api/sales', salesRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/clients', clientRoutes);
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date() });
 });
 
-// Error handling
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err);
   res.status(500).json({
@@ -57,39 +51,13 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
 const startServer = async () => {
   try {
-    // Initialize database
     await initializeDatabase();
     console.log('✅ Database initialized');
 
     app.listen(PORT, () => {
-      console.log(`
-🚀 API Server running on http://localhost:${PORT}
-📦 CORS enabled for: ${CORS_ORIGIN}
-🗄️  Database: computekSolutions (PostgreSQL)
-
-Available endpoints:
-  POST   /api/auth/login
-  GET    /api/auth/profile
-  PUT    /api/auth/profile
-  GET    /api/products
-  GET    /api/products/barcode/:barcode
-  POST   /api/products
-  PUT    /api/products/:id
-  DELETE /api/products/:id
-  GET    /api/inventory
-  GET    /api/inventory/low-stock
-  PUT    /api/inventory/:id
-  GET    /api/sales
-  POST   /api/sales
-  GET    /api/sales/stats/overview
-  GET    /api/sales/stats/seller
-  GET    /api/users
-  POST   /api/users
-  PUT    /api/users/:id
-      `);
+      console.log(`🚀 API Server running on http://localhost:${PORT}`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
