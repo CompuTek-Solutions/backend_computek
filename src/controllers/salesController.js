@@ -279,74 +279,106 @@ export const getSaleDetails = async (req, res) => {
   }
 };
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PERIOD_FILTER = `($1::uuid IS NULL OR s.seller_id = $1)
+  AND ($2::date IS NULL OR s.created_at >= $2::date)
+  AND ($3::date IS NULL OR s.created_at < $3::date + 1)`;
+
+const shiftDate = (isoDate, days) => {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+const fetchSummary = async (sellerId, from, to) => {
+  const result = await query(
+    `SELECT
+       COALESCE(SUM(s.total_amount), 0) AS total_revenue,
+       COUNT(*) AS total_orders,
+       COALESCE((
+         SELECT SUM(si.quantity) FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id
+         WHERE ${PERIOD_FILTER}
+       ), 0) AS total_items
+     FROM sales s
+     WHERE ${PERIOD_FILTER}`,
+    [sellerId, from, to]
+  );
+  const row = result.rows[0];
+  const totalRevenue = parseFloat(row.total_revenue);
+  const totalOrders = parseInt(row.total_orders, 10);
+  return {
+    total_revenue: totalRevenue,
+    total_orders: totalOrders,
+    total_items: parseInt(row.total_items, 10),
+    avg_order: totalOrders > 0 ? totalRevenue / totalOrders : 0,
+  };
+};
+
+const buildStatistics = async (sellerId, queryParams) => {
+  const from = DATE_RE.test(queryParams.date_from || '') ? queryParams.date_from : null;
+  const to = DATE_RE.test(queryParams.date_to || '') ? queryParams.date_to : null;
+  const params = [sellerId, from, to];
+
+  let previousRange = null;
+  if (from && to && from <= to) {
+    const days = Math.round((new Date(`${to}T00:00:00Z`) - new Date(`${from}T00:00:00Z`)) / 86400000) + 1;
+    previousRange = { from: shiftDate(from, -days), to: shiftDate(from, -1) };
+  }
+
+  const [summary, previousSummary, topProducts, categories, monthly] = await Promise.all([
+    fetchSummary(sellerId, from, to),
+    previousRange ? fetchSummary(sellerId, previousRange.from, previousRange.to) : null,
+    query(
+      `SELECT p.id, p.name, SUM(si.quantity) AS quantity_sold, SUM(si.subtotal) AS total_revenue
+       FROM sale_items si
+       JOIN sales s ON si.sale_id = s.id
+       JOIN products p ON si.product_id = p.id
+       WHERE ${PERIOD_FILTER}
+       GROUP BY p.id, p.name
+       ORDER BY quantity_sold DESC
+       LIMIT 10`,
+      params
+    ),
+    query(
+      `SELECT p.category, COUNT(DISTINCT si.sale_id) AS sales_count, SUM(si.subtotal) AS total_revenue
+       FROM sale_items si
+       JOIN sales s ON si.sale_id = s.id
+       JOIN products p ON si.product_id = p.id
+       WHERE ${PERIOD_FILTER} AND p.category IS NOT NULL
+       GROUP BY p.category
+       ORDER BY total_revenue DESC`,
+      params
+    ),
+    query(
+      `SELECT DATE_TRUNC('month', s.created_at)::date AS month,
+              COALESCE(SUM(s.total_amount), 0) AS total_revenue,
+              COUNT(*) AS sales_count
+       FROM sales s
+       WHERE ($1::uuid IS NULL OR s.seller_id = $1)
+       GROUP BY DATE_TRUNC('month', s.created_at)
+       ORDER BY month DESC
+       LIMIT 12`,
+      [sellerId]
+    ),
+  ]);
+
+  return {
+    summary,
+    previous_summary: previousSummary,
+    period: { date_from: from, date_to: to, previous: previousRange },
+    top_products: topProducts.rows,
+    categories: categories.rows,
+    monthly_sales: monthly.rows,
+  };
+};
+
 export const getStatistics = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Non autorisé' });
     }
-
-    const revenueResult = await query(
-      `SELECT COALESCE(SUM(total_amount), 0) as total_revenue
-       FROM sales`
-    );
-
-    const itemsResult = await query(
-      `SELECT COALESCE(SUM(quantity), 0) as total_items
-       FROM sale_items`
-    );
-
-    const ordersResult = await query('SELECT COUNT(*) as total_orders FROM sales');
-
-    const topProductsResult = await query(`
-      SELECT 
-        p.id,
-        p.name,
-        SUM(si.quantity) as quantity_sold,
-        SUM(si.subtotal) as total_revenue
-      FROM sale_items si
-      JOIN products p ON si.product_id = p.id
-      GROUP BY p.id, p.name
-      ORDER BY quantity_sold DESC
-      LIMIT 10
-    `);
-
-    const categoryResult = await query(`
-      SELECT 
-        p.category,
-        COUNT(DISTINCT si.sale_id) as sales_count,
-        SUM(si.subtotal) as total_revenue
-      FROM sale_items si
-      JOIN products p ON si.product_id = p.id
-      WHERE p.category IS NOT NULL
-      GROUP BY p.category
-      ORDER BY total_revenue DESC
-    `);
-
-    const monthlyResult = await query(`
-      SELECT 
-        DATE_TRUNC('month', s.created_at)::date as month,
-        COALESCE(SUM(s.total_amount), 0) as total_revenue,
-        COUNT(*) as sales_count
-      FROM sales s
-      GROUP BY DATE_TRUNC('month', s.created_at)
-      ORDER BY month DESC
-      LIMIT 12
-    `);
-
-    const totalRevenue = parseFloat(revenueResult.rows[0].total_revenue);
-    const totalOrders = parseInt(ordersResult.rows[0].total_orders, 10);
-
-    res.json({
-      summary: {
-        total_revenue: totalRevenue,
-        total_items: parseInt(itemsResult.rows[0].total_items),
-        total_orders: totalOrders,
-        avg_order: totalOrders > 0 ? totalRevenue / totalOrders : 0,
-      },
-      top_products: topProductsResult.rows,
-      categories: categoryResult.rows,
-      monthly_sales: monthlyResult.rows,
-    });
+    res.json(await buildStatistics(null, req.query));
   } catch (error) {
     console.error('Get statistics error:', error);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -360,84 +392,7 @@ export const getSellerStatistics = async (req, res) => {
     if (!sellerId) {
       return res.status(400).json({ error: 'seller_id requis' });
     }
-
-    const revenueResult = await query(
-      `SELECT COALESCE(SUM(total_amount), 0) as total_revenue
-       FROM sales WHERE seller_id = $1`,
-      [sellerId]
-    );
-
-    const ordersResult = await query(
-      'SELECT COUNT(*) as total_orders FROM sales WHERE seller_id = $1',
-      [sellerId]
-    );
-
-    const itemsResult = await query(
-      `SELECT COALESCE(SUM(si.quantity), 0) as total_items
-       FROM sale_items si
-       JOIN sales s ON si.sale_id = s.id
-       WHERE s.seller_id = $1`,
-      [sellerId]
-    );
-
-    const topProductsResult = await query(
-      `SELECT 
-        p.id,
-        p.name,
-        SUM(si.quantity) as quantity_sold,
-        SUM(si.subtotal) as total_revenue
-       FROM sale_items si
-       JOIN sales s ON si.sale_id = s.id
-       JOIN products p ON si.product_id = p.id
-       WHERE s.seller_id = $1
-       GROUP BY p.id, p.name
-       ORDER BY quantity_sold DESC
-       LIMIT 10`,
-      [sellerId]
-    );
-
-    const categoryResult = await query(
-      `SELECT 
-        p.category,
-        COUNT(DISTINCT si.sale_id) as sales_count,
-        SUM(si.subtotal) as total_revenue
-       FROM sale_items si
-       JOIN sales s ON si.sale_id = s.id
-       JOIN products p ON si.product_id = p.id
-       WHERE s.seller_id = $1 AND p.category IS NOT NULL
-       GROUP BY p.category
-       ORDER BY total_revenue DESC`,
-      [sellerId]
-    );
-
-    const monthlyResult = await query(
-      `SELECT 
-        DATE_TRUNC('month', s.created_at)::date as month,
-        COALESCE(SUM(s.total_amount), 0) as total_revenue,
-        COUNT(*) as sales_count
-       FROM sales s
-       WHERE s.seller_id = $1
-       GROUP BY DATE_TRUNC('month', s.created_at)
-       ORDER BY month DESC
-       LIMIT 12`,
-      [sellerId]
-    );
-
-    const totalRevenue = parseFloat(revenueResult.rows[0].total_revenue);
-    const totalOrders = parseInt(ordersResult.rows[0].total_orders, 10);
-    const totalItems = parseInt(itemsResult.rows[0].total_items, 10);
-
-    res.json({
-      summary: {
-        total_revenue: totalRevenue,
-        total_orders: totalOrders,
-        total_items: totalItems,
-        avg_order: totalOrders > 0 ? totalRevenue / totalOrders : 0,
-      },
-      top_products: topProductsResult.rows,
-      categories: categoryResult.rows,
-      monthly_sales: monthlyResult.rows,
-    });
+    res.json(await buildStatistics(sellerId, req.query));
   } catch (error) {
     console.error('Get seller statistics error:', error);
     res.status(500).json({ error: 'Erreur serveur' });
