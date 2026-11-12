@@ -1,7 +1,5 @@
 import { query } from './db.js';
-import bcrypt from 'bcryptjs';
 
-// Fonction pour initialiser la base de données
 export const initializeDatabase = async () => {
   try {
     // Create unaccent extension for accent-insensitive search
@@ -85,12 +83,10 @@ export const initializeDatabase = async () => {
       )
     `);
 
-    // Ajouter client_id à sales si la table existait déjà (migration)
     await query(`
       ALTER TABLE sales ADD COLUMN IF NOT EXISTS client_id UUID REFERENCES clients(id) ON DELETE SET NULL
     `).catch(() => {});
 
-    // Ajouter invoice_number à sales si la table existait déjà (migration)
     await query(`
       ALTER TABLE sales ADD COLUMN IF NOT EXISTS invoice_number VARCHAR(50)
     `).catch(() => {});
@@ -117,6 +113,25 @@ export const initializeDatabase = async () => {
         assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(seller_id, product_id)
       )
+    `);
+
+    await query(`
+      CREATE TABLE IF NOT EXISTS product_barcodes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        code VARCHAR(100) NOT NULL UNIQUE,
+        position INT NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await query('ALTER TABLE product_barcodes ADD COLUMN IF NOT EXISTS position INT NOT NULL DEFAULT 0');
+    await query('CREATE INDEX IF NOT EXISTS idx_product_barcodes_product ON product_barcodes(product_id)');
+
+    await query(`
+      INSERT INTO product_barcodes (product_id, code)
+      SELECT id, barcode FROM products
+      WHERE barcode IS NOT NULL AND barcode <> ''
+      ON CONFLICT (code) DO NOTHING
     `);
 
     console.log('✅ Tables created successfully');

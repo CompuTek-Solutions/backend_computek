@@ -1,4 +1,4 @@
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 
 const generateInvoiceNumber = () => {
   const date = new Date();
@@ -8,13 +8,12 @@ const generateInvoiceNumber = () => {
   return `INV-${year}${month}-${random}`;
 };
 
-// Create sale
 export const createSale = async (req, res) => {
   try {
     const { items, discount_amount, payment_method, notes, client_id } = req.body;
     const sellerId = req.user.id;
 
-    if (!items || items.length === 0) {
+    if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Aucun article dans la vente' });
     }
 
@@ -22,86 +21,92 @@ export const createSale = async (req, res) => {
       return res.status(400).json({ error: 'Mode de paiement requis' });
     }
 
-    await query('BEGIN');
+    const quantities = new Map();
+    for (const item of items) {
+      const qty = parseInt(item.quantity, 10);
+      if (!item.product_id || !Number.isInteger(qty) || qty <= 0) {
+        return res.status(400).json({ error: 'Article invalide dans la vente' });
+      }
+      quantities.set(item.product_id, (quantities.get(item.product_id) || 0) + qty);
+    }
 
-    try {
-      const productIds = items.map((item) => item.product_id);
+    const productIds = [...quantities.keys()];
 
-      // Verrouiller les lignes d'inventaire et valider le stock pour tous les articles en une seule requête
-      const stockResult = await query(
-        `SELECT product_id, quantity_on_hand FROM inventory WHERE product_id = ANY($1::uuid[]) FOR UPDATE`,
+    const outcome = await withTransaction(async (client) => {
+      const stockResult = await client.query(
+        `SELECT p.id, p.name, p.price_selling, COALESCE(i.quantity_on_hand, 0) AS quantity_on_hand
+         FROM products p
+         LEFT JOIN inventory i ON i.product_id = p.id
+         WHERE p.id = ANY($1::uuid[])
+         FOR UPDATE OF p`,
         [productIds]
       );
+      const productsById = new Map(stockResult.rows.map((r) => [r.id, r]));
 
-      const stockMap = Object.fromEntries(
-        stockResult.rows.map((r) => [r.product_id, r.quantity_on_hand])
-      );
-
-      for (const item of items) {
-        const available = stockMap[item.product_id] ?? 0;
-        if (available < item.quantity) {
-          await query('ROLLBACK');
-          return res.status(400).json({
-            error: `Stock insuffisant pour le produit ID ${item.product_id}. Disponible: ${available}`,
-          });
+      for (const [productId, qty] of quantities) {
+        const product = productsById.get(productId);
+        if (!product) return { error: 'Produit introuvable dans la vente', status: 400 };
+        if (product.quantity_on_hand < qty) {
+          return {
+            error: `Stock insuffisant pour "${product.name}". Disponible : ${product.quantity_on_hand}`,
+            status: 400,
+          };
         }
       }
 
-      const totalAmount =
-        items.reduce((sum, item) => sum + item.subtotal, 0) - (discount_amount || 0);
+      const lines = productIds.map((productId) => {
+        const product = productsById.get(productId);
+        const qty = quantities.get(productId);
+        const unitPrice = Number(product.price_selling);
+        return { productId, qty, unitPrice, subtotal: unitPrice * qty };
+      });
 
-      const invoiceNumber = generateInvoiceNumber();
+      const gross = lines.reduce((sum, l) => sum + l.subtotal, 0);
+      const discount = Math.min(Math.max(Number(discount_amount) || 0, 0), gross);
 
-      // Créer la vente
-      const saleResult = await query(
+      const saleResult = await client.query(
         `INSERT INTO sales (seller_id, client_id, total_amount, discount_amount, payment_method, status, notes, invoice_number)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7)
          RETURNING *`,
-        [sellerId, client_id || null, totalAmount, discount_amount || 0, payment_method, 'completed', notes || null, invoiceNumber]
+        [sellerId, client_id || null, gross - discount, discount, payment_method, notes || null, generateInvoiceNumber()]
+      );
+      const sale = saleResult.rows[0];
+
+      await client.query(
+        `INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, subtotal)
+         SELECT $1, unnest($2::uuid[]), unnest($3::int[]), unnest($4::numeric[]), unnest($5::numeric[])`,
+        [
+          sale.id,
+          lines.map((l) => l.productId),
+          lines.map((l) => l.qty),
+          lines.map((l) => l.unitPrice),
+          lines.map((l) => l.subtotal),
+        ]
       );
 
-      const saleId = saleResult.rows[0].id;
-
-      // Bulk INSERT des articles en une seule requête
-      const itemPlaceholders = items
-        .map((_, i) => {
-          const b = i * 4 + 2;
-          return `($1, $${b}, $${b + 1}, $${b + 2}, $${b + 3})`;
-        })
-        .join(', ');
-      const itemValues = [saleId];
-      items.forEach((item) =>
-        itemValues.push(item.product_id, item.quantity, item.unit_price, item.subtotal)
-      );
-      await query(
-        `INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, subtotal) VALUES ${itemPlaceholders}`,
-        itemValues
-      );
-
-      // Bulk UPDATE de l'inventaire en une seule requête via unnest
-      await query(
+      await client.query(
         `UPDATE inventory
          SET quantity_on_hand = inventory.quantity_on_hand - data.qty,
              updated_at = NOW()
          FROM (SELECT unnest($1::uuid[]) AS pid, unnest($2::int[]) AS qty) AS data
          WHERE inventory.product_id = data.pid`,
-        [productIds, items.map((item) => item.quantity)]
+        [lines.map((l) => l.productId), lines.map((l) => l.qty)]
       );
 
-      await query('COMMIT');
+      return { sale };
+    });
 
-      res.status(201).json(saleResult.rows[0]);
-    } catch (innerError) {
-      await query('ROLLBACK');
-      throw innerError;
+    if (outcome.error) {
+      return res.status(outcome.status).json({ error: outcome.error });
     }
+
+    res.status(201).json(outcome.sale);
   } catch (error) {
     console.error('Create sale error:', error);
     res.status(500).json({ error: error.message });
   }
 };
 
-// Get sales
 export const getSales = async (req, res) => {
   try {
     const { seller_id, search, payment_method, date_from, date_to } = req.query;
@@ -120,12 +125,10 @@ export const getSales = async (req, res) => {
       whereClauses.push(clause);
     };
 
-    // Si c'est un vendeur, ne voir que ses ventes
     if (req.user.role === 'seller') {
       params.push(req.user.id);
       addClause(`s.seller_id = $${params.length}`);
     } else if (seller_id) {
-      // Admin filtre par vendeur
       params.push(seller_id);
       addClause(`s.seller_id = $${params.length}`);
     }
@@ -229,7 +232,6 @@ export const getSales = async (req, res) => {
   }
 };
 
-// Get sale details
 export const getSaleDetails = async (req, res) => {
   try {
     const { id } = req.params;
@@ -255,6 +257,10 @@ export const getSaleDetails = async (req, res) => {
       return res.status(404).json({ error: 'Vente non trouvée' });
     }
 
+    if (req.user.role === 'seller' && saleResult.rows[0].seller_id !== req.user.id) {
+      return res.status(403).json({ error: 'Accès non autorisé' });
+    }
+
     const itemsResult = await query(
       `SELECT si.*, p.name as product_name
        FROM sale_items si
@@ -273,29 +279,24 @@ export const getSaleDetails = async (req, res) => {
   }
 };
 
-// Get statistics (Admin only)
 export const getStatistics = async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    // Total revenue
     const revenueResult = await query(
       `SELECT COALESCE(SUM(total_amount), 0) as total_revenue
        FROM sales`
     );
 
-    // Items sold
     const itemsResult = await query(
       `SELECT COALESCE(SUM(quantity), 0) as total_items
        FROM sale_items`
     );
 
-    // Orders count
     const ordersResult = await query('SELECT COUNT(*) as total_orders FROM sales');
 
-    // Top selling products
     const topProductsResult = await query(`
       SELECT 
         p.id,
@@ -309,7 +310,6 @@ export const getStatistics = async (req, res) => {
       LIMIT 10
     `);
 
-    // Sales by category
     const categoryResult = await query(`
       SELECT 
         p.category,
@@ -322,7 +322,6 @@ export const getStatistics = async (req, res) => {
       ORDER BY total_revenue DESC
     `);
 
-    // Monthly sales
     const monthlyResult = await query(`
       SELECT 
         DATE_TRUNC('month', s.created_at)::date as month,
@@ -334,12 +333,15 @@ export const getStatistics = async (req, res) => {
       LIMIT 12
     `);
 
+    const totalRevenue = parseFloat(revenueResult.rows[0].total_revenue);
+    const totalOrders = parseInt(ordersResult.rows[0].total_orders, 10);
+
     res.json({
       summary: {
-        total_revenue: parseFloat(revenueResult.rows[0].total_revenue),
+        total_revenue: totalRevenue,
         total_items: parseInt(itemsResult.rows[0].total_items),
-        total_orders: parseInt(ordersResult.rows[0].count),
-        avg_order: parseFloat(revenueResult.rows[0].total_revenue) / parseInt(ordersResult.rows[0].count) || 0,
+        total_orders: totalOrders,
+        avg_order: totalOrders > 0 ? totalRevenue / totalOrders : 0,
       },
       top_products: topProductsResult.rows,
       categories: categoryResult.rows,
@@ -351,7 +353,6 @@ export const getStatistics = async (req, res) => {
   }
 };
 
-// Get seller statistics
 export const getSellerStatistics = async (req, res) => {
   try {
     const sellerId = req.user.role === 'seller' ? req.user.id : req.query.seller_id;
@@ -423,20 +424,16 @@ export const getSellerStatistics = async (req, res) => {
     );
 
     const totalRevenue = parseFloat(revenueResult.rows[0].total_revenue);
-    const totalOrders = parseInt(ordersResult.rows[0].count);
-    const totalItems = parseInt(itemsResult.rows[0].total_items);
-    const commissionRate = 0; // Commission removed
-    const commission = 0;
+    const totalOrders = parseInt(ordersResult.rows[0].total_orders, 10);
+    const totalItems = parseInt(itemsResult.rows[0].total_items, 10);
 
     res.json({
       summary: {
         total_revenue: totalRevenue,
         total_orders: totalOrders,
         total_items: totalItems,
-        avg_order: totalRevenue / totalOrders || 0,
+        avg_order: totalOrders > 0 ? totalRevenue / totalOrders : 0,
       },
-      commission_rate: commissionRate,
-      commission,
       top_products: topProductsResult.rows,
       categories: categoryResult.rows,
       monthly_sales: monthlyResult.rows,
@@ -447,56 +444,45 @@ export const getSellerStatistics = async (req, res) => {
   }
 };
 
-// Delete sale / invoice
 export const deleteSale = async (req, res) => {
   const { id } = req.params;
 
   try {
-    await query('BEGIN');
+    const outcome = await withTransaction(async (client) => {
+      const saleResult = await client.query(
+        'SELECT id, seller_id FROM sales WHERE id = $1 FOR UPDATE',
+        [id]
+      );
 
-    const saleResult = await query(
-      `SELECT id, seller_id FROM sales WHERE id = $1 FOR UPDATE`,
-      [id]
-    );
+      if (saleResult.rows.length === 0) return { status: 404, error: 'Facture introuvable' };
 
-    if (saleResult.rows.length === 0) {
-      await query('ROLLBACK');
-      return res.status(404).json({ error: 'Facture introuvable' });
-    }
+      if (req.user.role === 'seller' && saleResult.rows[0].seller_id !== req.user.id) {
+        return { status: 403, error: 'Action non autorisée' };
+      }
 
-    const sale = saleResult.rows[0];
-
-    if (req.user.role === 'seller' && sale.seller_id !== req.user.id) {
-      await query('ROLLBACK');
-      return res.status(403).json({ error: 'Action non autorisée' });
-    }
-
-    const itemsResult = await query(
-      `SELECT product_id, quantity FROM sale_items WHERE sale_id = $1`,
-      [id]
-    );
-
-    if (itemsResult.rows.length > 0) {
-      const productIds = itemsResult.rows.map((item) => item.product_id);
-      const quantities = itemsResult.rows.map((item) => item.quantity);
-
-      await query(
+      await client.query(
         `UPDATE inventory
          SET quantity_on_hand = inventory.quantity_on_hand + data.qty,
              updated_at = NOW()
-         FROM (SELECT unnest($1::uuid[]) AS pid, unnest($2::int[]) AS qty) AS data
+         FROM (
+           SELECT product_id AS pid, SUM(quantity)::int AS qty
+           FROM sale_items WHERE sale_id = $1
+           GROUP BY product_id
+         ) AS data
          WHERE inventory.product_id = data.pid`,
-        [productIds, quantities]
+        [id]
       );
+
+      await client.query('DELETE FROM sales WHERE id = $1', [id]);
+      return {};
+    });
+
+    if (outcome.error) {
+      return res.status(outcome.status).json({ error: outcome.error });
     }
-
-    await query(`DELETE FROM sales WHERE id = $1`, [id]);
-
-    await query('COMMIT');
 
     res.json({ message: 'Facture supprimée avec succès' });
   } catch (error) {
-    await query('ROLLBACK');
     console.error('Delete sale error:', error);
     res.status(500).json({ error: 'Erreur serveur lors de la suppression' });
   }

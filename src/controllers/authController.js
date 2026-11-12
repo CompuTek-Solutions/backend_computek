@@ -13,7 +13,6 @@ export const login = async (req, res) => {
       return res.status(400).json({ error: 'Email/Nom d\'utilisateur et mot de passe sont requis' });
     }
 
-    // Chercher l'utilisateur soit par email soit par name
     const result = await query(
       'SELECT * FROM users WHERE email = $1 OR name = $1',
       [email]
@@ -107,7 +106,6 @@ export const updatePassword = async (req, res) => {
     }
 
     if (newEmail) {
-      // Vérifier que le nouvel email n'existe pas
       const emailExists = await query('SELECT id FROM users WHERE email = $1 AND id != $2', [
         newEmail,
         userId,
